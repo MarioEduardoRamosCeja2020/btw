@@ -1,0 +1,19 @@
+🚫 BOT BANEADO O DESCONECTADO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📅 Fecha y hora: 20/12/2025, 12:39:13
+⚠️  Motivo: Proceso interrumpido por SIGINT - Posible cierre forzado
+🔍 Método de detección: signal_handler
+
+📋 ÚLTIMO PLUGIN USADO ANTES DEL BANEO:
+▶️  Archivo: desconocido
+💬 Comando: ninguno
+👤 Usuario: desconocido
+🕒 Timestamp del comando: desconocido
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️  POSIBLE CAUSA DEL BANEO: Plugin "desconocido"
+
+Este archivo se generó automáticamente cuando se detectó
+una desconexión sospechosa del bot de WhatsApp.

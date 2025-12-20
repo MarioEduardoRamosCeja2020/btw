@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "autoClean": false,
+  "intervalHours": 6,
+  "lastCleanTime": null
+}
