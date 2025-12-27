@@ -35,51 +35,14 @@ import mentionListener from './plugins/game-ialuna.js';
 const { chain } = lodash;
 const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;
 let stopped = 'close';  
-
-const messageQueue = [];
-global.isProcessing = false;
-let messageCount = 0;
-let lastMinuteReset = Date.now();
-const MAX_MESSAGES_PER_MINUTE = 20;
-
-function getRandomDelay() {
-  return Math.floor(Math.random() * (800 - 300 + 1) + 300);
-}
-
-async function processMessageQueue() {
-  if (global.isProcessing || messageQueue.length === 0) return;
-  
-  const now = Date.now();
-  if (now - lastMinuteReset >= 60000) {
-    messageCount = 0;
-    lastMinuteReset = now;
-  }
-  
-  if (messageCount >= MAX_MESSAGES_PER_MINUTE) {
-    setTimeout(processMessageQueue, 2000);
-    return;
-  }
-  
-  global.isProcessing = true;
-  const msg = messageQueue.shift();
-  messageCount++;
-  
-  try {
-    await global.conn.handler(msg);
-  } catch (err) {
-    secureLogger.error('ERROR procesando mensaje:', err);
-  }
-  
-  global.isProcessing = false;
-  
-  if (messageQueue.length > 0) {
-    const delay = getRandomDelay();
-    setTimeout(processMessageQueue, delay);
-  }
-}
+let pairingTimeout = null;
+let pairingStartTime = null;
+const PAIRING_TIMEOUT_DURATION = 120000;
 
 protoType();
 serialize();
+
+const msgRetryCounterMap = new Map();
 
 global.__filename = function filename(pathURL = import.meta.url, rmPrefix = platform !== 'win32') {
   return rmPrefix ? /file:\/\/\//.test(pathURL) ? fileURLToPath(pathURL) : pathURL : pathToFileURL(pathURL).toString();
@@ -96,6 +59,35 @@ global.__require = function require(dir = import.meta.url) {
 global.API = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({...query, ...(apikeyqueryname ? {[apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name]} : {})})) : '');
 
 global.timestamp = { start: new Date };
+
+async function clearSessionAndRestart() {
+    console.log(chalk.red('[ ✖ ] Timeout de pareado alcanzado. Limpiando sesión...'));
+    
+    if (pairingTimeout) {
+        clearTimeout(pairingTimeout);
+        pairingTimeout = null;
+    }
+    
+    const carpetas = [global.authFile, 'MysticSession'];
+    const eliminadas = [];
+    
+    await Promise.allSettled(
+        carpetas.map(async (carpeta) => {
+            const ruta = `./${carpeta}`;
+            if (fs.existsSync(ruta)) {
+                await fs.promises.rm(ruta, { recursive: true, force: true });
+                eliminadas.push(carpeta);
+            }
+        })
+    );
+    
+    if (eliminadas.length > 0) {
+        console.log(chalk.yellow(`[ ℹ️ ] Limpieza completada: ${eliminadas.join(', ')}`));
+    }
+    
+    console.log(chalk.yellow('[ ℹ️ ] Reiniciando en 2 segundos...'));
+    setTimeout(() => process.exit(1), 2000);
+}
 
 global.videoList = [];
 global.videoListXXX = [];
@@ -158,12 +150,17 @@ global.loadChatgptDB = async function loadChatgptDB() {
 };
 loadChatgptDB();
 
-// --- CAMBIO AQUÍ: Forzado a QR directamente ---
-let opcion = '1'; 
+// FORZADO A OPCIÓN 2 (CÓDIGO)
+let opcion = '2';
 const authFolder = global.authFile;
+let phoneNumber = global.botnumber || process.argv.find(arg => /^\+\d+$/.test(arg));
+
+const MethodMobile = process.argv.includes("mobile");
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
 if (!fs.existsSync(`./${authFolder}/creds.json`)) {
-    console.log(chalk.cyan('[ ℹ️ ] Iniciando modo Código QR...'));
+    console.log(chalk.cyan('[ ℹ️ ] No se encontró sesión existente. Iniciando vinculación por código...'));
 } else {
     console.log(chalk.green('[ ℹ️ ] Sesión existente encontrada'));
 }
@@ -175,7 +172,7 @@ console.info = () => {}
 
 const connectionOptions = {
     logger: Pino({ level: 'silent' }),
-    printQRInTerminal: true, // Siempre mostrar QR
+    printQRInTerminal: false, // Desactivado
     mobile: false,
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
     auth: {
@@ -185,8 +182,10 @@ const connectionOptions = {
             Pino({ level: 'fatal' }).child({ level: 'fatal' })
         ),
     },
+
     markOnlineOnConnect: true,
     generateHighQualityLinkPreview: false,
+
     qrTimeout: 40000,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
@@ -194,7 +193,9 @@ const connectionOptions = {
     syncFullHistory: false,
     fireInitQueries: false,
     emitOwnEvents: false,
+
     version,
+
     getMessage: async (key) => {
         try {
             let jid = jidNormalizedUser(key.remoteJid);
@@ -205,11 +206,37 @@ const connectionOptions = {
             return '';
         }
     },
-    msgRetryCounterCache: new NodeCache({ stdTTL: 300, checkperiod: 60, useClones: false }),
-    userDevicesCache: new NodeCache({ stdTTL: 3600, checkperiod: 300, useClones: false }),
+
+    patchMessageBeforeSending: async (message) => {
+        return message;
+    },
+
+    msgRetryCounterCache: new NodeCache({
+        stdTTL: 300,
+        checkperiod: 60,
+        useClones: false
+    }),
+    userDevicesCache: new NodeCache({
+        stdTTL: 3600,
+        checkperiod: 300,
+        useClones: false
+    }),
+
+    cachedGroupMetadata: (jid) => {
+        const chat = global.conn.chats[jid];
+        if (chat) {
+            return {
+                id: chat.id,
+                subject: chat.subject,
+                participants: chat.participants?.length || 0
+            };
+        }
+        return {};
+    },
 };
 
 global.conn = makeWASocket(connectionOptions);
+
 conn.ev.on('creds.update', saveCreds);
 
 setInterval(async () => {
@@ -229,7 +256,161 @@ if (ownerConfig.auread) global.opts['autoread'] = true;
 if (ownerConfig.modogrupos) global.conn.modogrupos = true;
 conn.ev.on('connection.update', connectionUpdate);
 
+conn.logger.info(`[ ℹ️ ] Cargando...\n`);
+
+if (!fs.existsSync(`./${authFolder}/creds.json`)) {
+    console.log(chalk.yellow('[ ℹ️ ] Modo código de 8 dígitos activo'));
+    
+    if (MethodMobile) {
+        console.log(chalk.red('[ ● ] No se puede usar código de emparejamiento con API móvil'));
+        process.exit(1);
+    }
+
+    let numeroTelefono;
+    
+    if (phoneNumber) {
+        numeroTelefono = phoneNumber.replace(/[^0-9]/g, '');
+        console.log(chalk.green('[ ℹ️ ] Usando número proporcionado:'), phoneNumber);
+        
+        if (!numeroTelefono.match(/^\d+$/) || !Object.keys(PHONENUMBER_MCC).some(v => numeroTelefono.startsWith(v))) {
+            console.log(chalk.red('[ ● ] Número de teléfono inválido:'), phoneNumber);
+            console.log(chalk.yellow('[ ℹ️ ] Formato correcto: +5493483511079'));
+            process.exit(1);
+        }
+    } else {
+        while (true) {
+            numeroTelefono = await question(chalk.bgBlack(chalk.bold.yellowBright('[ ℹ️ ] Escriba su número de WhatsApp (incluya código de país):\nEjemplo: +5493483511079\n---> ')));
+            numeroTelefono = numeroTelefono.replace(/[^0-9]/g, '');
+            if (numeroTelefono.match(/^\d+$/) && Object.keys(PHONENUMBER_MCC).some(v => numeroTelefono.startsWith(v))) {
+                break;
+            } else {
+                console.log(chalk.red('[ ● ] Número inválido. Use formato: +5493483511079'));
+            }
+        }
+    }
+
+    rl.close();
+
+    global.conn.phoneNumber = numeroTelefono;
+    pairingStartTime = Date.now();
+    
+    pairingTimeout = setTimeout(() => {
+        if (!global.conn?.user) {
+            clearSessionAndRestart();
+        }
+    }, PAIRING_TIMEOUT_DURATION);
+    
+    console.log(chalk.yellow(`[ ⏰ ] Tienes ${PAIRING_TIMEOUT_DURATION / 1000} segundos para completar el pareado`));
+    
+    setTimeout(async () => {
+        try {
+            console.log(chalk.yellow('[ ℹ️ ] Preparando solicitud de código de emparejamiento...'));
+            
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            let codigo;
+            let intentos = 0;
+            const maxIntentos = 3;
+            
+            while (intentos < maxIntentos && !global.conn?.user) {
+                try {
+                    intentos++;
+                    console.log(chalk.yellow(`[ ℹ️ ] Solicitando código de emparejamiento... (Intento ${intentos}/${maxIntentos})`));
+                    
+                    codigo = await global.conn.requestPairingCode(numeroTelefono);
+                    
+                    if (codigo) {
+                        codigo = codigo?.match(/.{1,4}/g)?.join("-") || codigo;
+                        
+                        console.log(chalk.green('┌─────────────────────────────────────────────┐'));
+                        console.log(chalk.green.bold('📱 CÓDIGO DE EMPAREJAMIENTO:'));
+                        console.log(chalk.yellow.bold('    ' + codigo));
+                        console.log(chalk.green('└─────────────────────────────────────────────┘'));
+                        console.log(chalk.cyan('[ ℹ️ ] Pasos para vincular:'));
+                        console.log(chalk.cyan('1. Abre WhatsApp en tu teléfono'));
+                        console.log(chalk.cyan('2. Ve a Configuración > Dispositivos vinculados'));
+                        console.log(chalk.cyan('3. Toca "Vincular dispositivo"'));
+                        console.log(chalk.cyan('4. Selecciona "Vincular con número de teléfono"'));
+                        console.log(chalk.cyan('5. Ingresa el código de arriba'));
+                        console.log(chalk.red.bold(`6. IMPORTANTE: Tienes ${Math.floor((PAIRING_TIMEOUT_DURATION - (Date.now() - pairingStartTime)) / 1000)} segundos restantes`));
+                        console.log(chalk.green('└─────────────────────────────────────────────┘'));
+                        
+                        break;
+                    }
+                    
+                } catch (error) {
+                    console.log(chalk.red(`[ ● ] Error en intento ${intentos}:`, error.message));
+                    
+                    if (error.message.includes('rate limit') || error.message.includes('too many requests')) {
+                        console.log(chalk.yellow('[ ℹ️ ] Límite de velocidad alcanzado. Esperando...'));
+                        await new Promise(resolve => setTimeout(resolve, 10000));
+                    } else if (intentos < maxIntentos) {
+                        console.log(chalk.yellow(`[ ℹ️ ] Reintentando en 3 segundos...`));
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    }
+                }
+            }
+            
+            if (!codigo) {
+                console.log(chalk.red('[ ● ] No se pudo obtener el código después de varios intentos'));
+                clearSessionAndRestart();
+                return;
+            }
+            
+            let codigoRenovado = false;
+            const intervaloCodigo = setInterval(async () => {
+                if (global.conn?.user) {
+                    clearInterval(intervaloCodigo);
+                    if (pairingTimeout) {
+                        clearTimeout(pairingTimeout);
+                        pairingTimeout = null;
+                    }
+                    console.log(chalk.green('[ ✅ ] ¡Dispositivo vinculado exitosamente!'));
+                    return;
+                }
+                
+                if (!pairingTimeout) {
+                    clearInterval(intervaloCodigo);
+                    return;
+                }
+                
+                const tiempoRestante = Math.floor((PAIRING_TIMEOUT_DURATION - (Date.now() - pairingStartTime)) / 1000);
+                if (tiempoRestante <= 0) {
+                    clearInterval(intervaloCodigo);
+                    return;
+                }
+                
+                if (!codigoRenovado && tiempoRestante < 90) {
+                    try {
+                        console.log(chalk.yellow(`[ ℹ️ ] Renovando código... (${tiempoRestante}s restantes)`));
+                        const nuevoCodigo = await global.conn.requestPairingCode(numeroTelefono);
+                        const codigoFormateado = nuevoCodigo?.match(/.{1,4}/g)?.join("-") || nuevoCodigo;
+                        
+                        console.log(chalk.green('┌─────────────────────────────────────────────┐'));
+                        console.log(chalk.green.bold('📱 NUEVO CÓDIGO DE EMPAREJAMIENTO:'));
+                        console.log(chalk.yellow.bold('    ' + codigoFormateado));
+                        console.log(chalk.red.bold(`⏰ Tiempo restante: ${tiempoRestante} segundos`));
+                        console.log(chalk.green('└─────────────────────────────────────────────┘'));
+                        
+                        codigoRenovado = true;
+                        
+                    } catch (error) {
+                        console.log(chalk.red('[ ● ] Error al renovar código:', error.message));
+                    }
+                }
+            }, 15000);
+            
+        } catch (error) {
+            console.error(chalk.red('[ ● ] Error crítico:'), error.message);
+            clearSessionAndRestart();
+        }
+    }, 5000);
+}
+
+// ... EL RESTO DEL CÓDIGO SE MANTIENE IGUAL ...
+conn.logger.info(`[ ℹ️ ] Cargando...\n`);
 if (isCleanerEnabled()) runCleaner();
+
 startAutoCleanService();
 
 if (!opts['test']) {
@@ -261,45 +442,75 @@ async function clearTmp() {
   }
 }
 
-let lastQR = null;
+if (privacyConfig.dataRetention.enabled) {
+    setInterval(() => {
+        if (stopped === 'close' || !global.conn || !global.conn?.user) return;
+        cleanOldUserData();
+    }, 1000 * 60 * 60 * 24);
+}
+
+const dirToWatchccc = path.join(__dirname, './');
+function deleteCoreFiles(filePath) {
+  const coreFilePattern = /^core\.\d+$/i;
+  const filename = path.basename(filePath);
+  if (coreFilePattern.test(filename)) {
+    fs.unlink(filePath, (err) => {
+      if (!err) secureLogger.info(`Archivo eliminado: ${filePath}`);
+    });
+  }
+}
+fs.watch(dirToWatchccc, (eventType, filename) => {
+  if (eventType === 'rename') {
+    const filePath = path.join(dirToWatchccc, filename);
+    fs.stat(filePath, (err, stats) => {
+      if (!err && stats.isFile()) deleteCoreFiles(filePath);
+    });
+  }
+});
+
+function runCleaner() {
+  const cleaner = fork('./lib/cleaner.js');
+}
+
 async function connectionUpdate(update) {
-  const { connection, lastDisconnect, isNewLogin, qr } = update;
+  const { connection, lastDisconnect, isNewLogin } = update;
   stopped = connection;
   if (isNewLogin) conn.isInit = true;
 
-  if (qr) {
-    if (qr !== lastQR) {
-      console.log(chalk.yellow('[ ℹ️ ] Escanea el código QR que aparece arriba.'));
-      lastQR = qr;
-    }
-  }
-
   if (connection === 'open') {
     console.log(chalk.green('[ ✅ ] Conectado correctamente a WhatsApp'));
+    if (pairingTimeout) {
+        clearTimeout(pairingTimeout);
+        pairingTimeout = null;
+    }
   } else if (connection === 'close') {
     let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
     if (reason === DisconnectReason.loggedOut) {
-       console.log(chalk.red('[ ✖ ] Sesión cerrada, por favor elimina la carpeta de sesión y reescanea.'));
+        conn.logger.error(`[ ⚠ ] Sesión cerrada. Elimina la carpeta ${global.authFile} para re-vincular.`);
     } else {
-       console.log(chalk.yellow('[ ℹ️ ] Reintentando conexión...'));
-       await global.reloadHandler(true).catch(console.error);
+        setTimeout(async () => { await global.reloadHandler(true).catch(console.error); }, 2000);
     }
   }
 }
 
+process.on('uncaughtException', console.error);
+
+let isInit = true;
 let handler = await import('./handler.js');
 global.reloadHandler = async function(restatConn) {
   try {
     const Handler = await import(`./handler.js?update=${Date.now()}`).catch(console.error);
     if (Object.keys(Handler || {}).length) handler = Handler;
   } catch (e) { console.error(e); }
-
+  
   if (restatConn) {
+    const oldChats = global.conn.chats;
     try { global.conn.ws.close(); } catch { }
     conn.ev.removeAllListeners();
-    global.conn = makeWASocket(connectionOptions);
+    global.conn = makeWASocket(connectionOptions, {chats: oldChats});
     conn.ev.on('creds.update', saveCreds);
     store?.bind(conn);
+    isInit = true;
   }
 
   conn.handler = handler.handler.bind(global.conn);
@@ -310,13 +521,7 @@ global.reloadHandler = async function(restatConn) {
   conn.connectionUpdate = connectionUpdate.bind(global.conn);
   conn.credsUpdate = saveCreds.bind(global.conn, true);
 
-  conn.ev.removeAllListeners('messages.upsert');
-  conn.ev.on('messages.upsert', async (msg) => {
-    if (!msg.messages || msg.messages[0].key.fromMe) return;
-    messageQueue.push(msg);
-    processMessageQueue();
-  });
-
+  conn.ev.on('messages.upsert', conn.handler);
   conn.ev.on('group-participants.update', conn.participantsUpdate);
   conn.ev.on('groups.update', conn.groupsUpdate);
   conn.ev.on('message.delete', conn.onDelete);
@@ -324,10 +529,11 @@ global.reloadHandler = async function(restatConn) {
   conn.ev.on('connection.update', conn.connectionUpdate);
   conn.ev.on('creds.update', conn.credsUpdate);
 
-  if (!global.mentionListenerInitialized) {
+  if (restatConn || !global.mentionListenerInitialized) {
     mentionListener(conn);
     global.mentionListenerInitialized = true;
   }
+  isInit = false;
   return true;
 };
 
@@ -345,32 +551,52 @@ async function filesInit() {
     }
   }
 }
-filesInit().then(() => {}).catch(console.error);
+filesInit().catch(console.error);
 
-watch(pluginFolder, async (_ev, filename) => {
-    if (pluginFilter(filename)) {
-        const dir = global.__filename(join(pluginFolder, filename), true);
-        try {
-            const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
-            global.plugins[filename] = module.default || module;
-        } catch (e) { console.error(`Error recargando plugin ${filename}`); }
-    }
-});
-
+global.reload = async (_ev, filename) => {
+  if (pluginFilter(filename)) {
+    const dir = global.__filename(join(pluginFolder, filename), true);
+    try {
+        const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
+        global.plugins[filename] = module.default || module;
+    } catch (e) { }
+  }
+};
+watch(pluginFolder, global.reload);
 await global.reloadHandler();
 
+async function _quickTest() {
+  const test = await Promise.all([
+    spawn('ffmpeg'),
+    spawn('ffprobe'),
+    spawn('find', ['--version']),
+  ].map((p) => {
+    return Promise.race([
+      new Promise((resolve) => { p.on('close', (code) => resolve(code !== 127)); }),
+      new Promise((resolve) => { p.on('error', (_) => resolve(false)); })]);
+  }));
+  global.support = {ffmpeg: test[0], ffprobe: test[1], find: test[2]};
+}
+
+setInterval(() => {
+  if (stopped === 'close' || !global.conn || !global.conn?.user) return;
+  clearTmp();
+}, 1000 * 60 * 60 * 2);
+
 setInterval(async () => {
-  if (stopped === 'close' || !global.conn?.user) return;
+  if (stopped === 'close' || !global.conn || !global.conn?.user) return;
   const _uptime = process.uptime() * 1000;
   const uptime = clockString(_uptime);
-  await global.conn?.updateProfileStatus(`• Activo: ${uptime} | TheMystic-Bot-MD`).catch(() => {});
+  const bio = `• Activo: ${uptime} | TheMystic-Bot-MD`;
+  await global.conn?.updateProfileStatus(bio).catch(() => {});
 }, 60000);
 
 function clockString(ms) {
-  let h = Math.floor(ms / 3600000) % 24;
-  let m = Math.floor(ms / 60000) % 60;
-  let s = Math.floor(ms / 1000) % 60;
-  return `${h}h ${m}m ${s}s`;
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor(ms / 3600000) % 24;
+  const m = Math.floor(ms / 60000) % 60;
+  const s = Math.floor(ms / 1000) % 60;
+  return `${d}d ${h}h ${m}m ${s}s`;
 }
 
-process.on('uncaughtException', console.error);
+_quickTest().catch(console.error);
