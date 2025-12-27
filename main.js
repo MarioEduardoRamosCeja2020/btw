@@ -424,7 +424,8 @@ if (!opts['test']) {
 if (opts['server']) (await import('./server.js')).default(global.conn, PORT);
 
 async function clearTmp() {
-  const tmp = [join('./src/tmp'), join('./temp')];
+  // Usamos process.cwd() para asegurar que partimos de la raíz del proyecto
+  const tmp = [join(process.cwd(), 'src', 'tmp'), join(process.cwd(), 'temp')];
   try {
     for (const dirname of tmp) {
       if (!existsSync(dirname)) continue;
@@ -432,13 +433,14 @@ async function clearTmp() {
       await Promise.all(files.map(async file => {
         const filePath = join(dirname, file);
         const stats = await stat(filePath);
+        // Si el archivo tiene más de 30 minutos, se elimina
         if (stats.isFile() && (Date.now() - stats.mtimeMs >= 1000 * 60 * 30)) {
-          await unlink(filePath);
+          await unlink(filePath).catch(() => {}); 
         }
       }));
     }
   } catch (err) {
-    secureLogger.error('Error en clearTmp:', err.message);
+    if (global.secureLogger) secureLogger.error('Error en clearTmp:', err.message);
   }
 }
 

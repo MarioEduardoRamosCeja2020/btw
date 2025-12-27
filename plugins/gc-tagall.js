@@ -16,30 +16,47 @@ const handler = async (m, { conn, participants, args, isOwner }) => {
 
   const isUserAdmin = groupAdmins.includes(realUserJid);
   if (!isUserAdmin && !isOwner) {
-    return m.reply('⚠️ Este comando solo puede ser usado por administradores del grupo.');
+    return m.reply('⚠️ *Acceso Denegado* | Solo administradores.');
   }
 
   if (cooldowns.has(chatId)) {
     const expirationTime = cooldowns.get(chatId) + cooldownTime;
     if (now < expirationTime) {
       const timeLeft = Math.ceil((expirationTime - now) / 1000);
-      const minutes = Math.floor(timeLeft / 60);
-      const seconds = timeLeft % 60;
-      return m.reply(`⏰ Debes esperar ${minutes}m ${seconds}s antes de usar este comando nuevamente.`);
+      return m.reply(`⏳ *Espera un momento:* ${timeLeft} segundos restantes.`);
     }
   }
   cooldowns.set(chatId, now);
 
-  const messageText = args.join(' ') || '*¡Atención!*';
-  let teks = `┏━━━ ⸢ Tag All ⸣ ━━━\n`;
-  teks += `${messageText}\n\n`;
+  const messageText = args.join(' ') || 'Sin mensaje de referencia';
+  
+  // --- DISEÑO VISUAL MODERNO ---
+  let teks = `『 *𝐈𝐍𝐕𝐎𝐂𝐀𝐂𝐈𝐎́𝐍 𝐆𝐄𝐍𝐄𝐑𝐀𝐋* 』\n\n`;
+  teks += `📢 *Mensaje:* ${messageText}\n\n`;
+  teks += `┌──────────────────\n`;
+  
   for (const mem of participants) {
-    teks += `┣➥ @${mem.id.split('@')[0]}\n`;
+    // Usamos un símbolo más moderno y limpio (•)
+    teks += `│ ⚡ @${mem.id.split('@')[0]}\n`;
   }
-  teks += `┗━━━━━━━━━━━━━━━━\n`;
-  teks += `*└* Luna-Botv6 - 𝐁𝐨𝐭\n\n*▌│█║▌║▌║║▌║▌║▌║█*`;
+  
+  teks += `└──────────────────\n\n`;
+  teks += `> *Luna-Botv6 • System*`;
 
-  await conn.sendMessage(chatId, { text: teks, mentions: participants.map(a => a.id) });
+  await conn.sendMessage(chatId, { 
+    text: teks, 
+    mentions: participants.map(a => a.id),
+    contextInfo: {
+      externalAdReply: {
+        title: 'ʟᴜɴᴀ-ʙᴏᴛᴠ6',
+        body: 'Invocación Activa',
+        thumbnailUrl: 'https://i.imgur.com/your_image.jpg', // Opcional: agrega una imagen
+        sourceUrl: '',
+        mediaType: 1,
+        renderLargerThumbnail: false
+      }
+    }
+  });
 };
 
 handler.help = ['tagall <mensaje>'];
