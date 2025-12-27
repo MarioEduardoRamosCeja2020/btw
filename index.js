@@ -1,242 +1,219 @@
 "use strict";
-process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1'; 
-import './config.js';
-import './api.js';
+import { join, dirname } from 'path';
 import { createRequire } from 'module';
-import path, { join } from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
-import { platform } from 'process';
-import { readdirSync, statSync, unlinkSync, existsSync, readFileSync, watch } from 'fs';
-import yargs from 'yargs';
-import fs from 'fs';
-import { readdir, unlink, stat } from 'fs/promises';
-import { spawn, fork } from 'child_process';
-import lodash from 'lodash';
-import chalk from 'chalk';
-import syntaxerror from 'syntax-error';
-import { format } from 'util';
-import pino from 'pino';
-import Pino from 'pino';
-import { Boom } from '@hapi/boom';
-import { isJidBroadcast } from '@whiskeysockets/baileys';
-import { makeWASocket, protoType, serialize } from './src/libraries/simple.js';
-import { Low, JSONFile } from 'lowdb';
-import store from './src/libraries/store.js';
-const { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, PHONENUMBER_MCC } = await import("@whiskeysockets/baileys");
+import { fileURLToPath } from 'url';
+import { setupMaster, fork } from 'cluster';
+import cfonts from 'cfonts';
 import readline from 'readline';
-import NodeCache from 'node-cache';
-import { restaurarConfiguraciones } from './lib/funcConfig.js';
-import { getOwnerFunction } from './lib/owner-funciones.js';
-import { isCleanerEnabled } from './lib/cleaner-config.js';
-import { startAutoCleanService } from './auto-cleaner.js';
-import { privacyConfig, cleanOldUserData, secureLogger } from './privacy-config.js';
-import mentionListener from './plugins/game-ialuna.js';
+import yargs from 'yargs';
+import chalk from 'chalk';
+import fs from 'fs/promises';
+import fsSync from 'fs';
+import './config.js';
 
-const { chain } = lodash;
-const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;
-let stopped = 'close';  
+import { PHONENUMBER_MCC } from '@whiskeysockets/baileys';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(__dirname);
+const { say } = cfonts;
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+let isRunning = false;
 
-const messageQueue = [];
-global.isProcessing = false;
-let messageCount = 0;
-let lastMinuteReset = Date.now();
-const MAX_MESSAGES_PER_MINUTE = 20;
+const question = (texto) => new Promise((resolver) => rl.question(texto, resolver));
 
-// Definición de runCleaner (Faltaba esta función)
-function runCleaner() {
-  try {
-    const cleaner = fork('./lib/cleaner.js');
-    cleaner.on('message', msg => console.log(chalk.cyan('[CLEANER]'), msg));
-    cleaner.on('exit', code => console.log(chalk.cyan(`[CLEANER]`), `Terminó con código ${code}`));
-  } catch (e) {
-    console.error(chalk.red('Error al iniciar cleaner:'), e);
-  }
-}
-
-function getRandomDelay() {
-  return Math.floor(Math.random() * (800 - 300 + 1) + 300);
-}
-
-async function processMessageQueue() {
-  if (global.isProcessing || messageQueue.length === 0) return;
-  const now = Date.now();
-  if (now - lastMinuteReset >= 60000) {
-    messageCount = 0;
-    lastMinuteReset = now;
-  }
-  if (messageCount >= MAX_MESSAGES_PER_MINUTE) {
-    setTimeout(processMessageQueue, 2000);
-    return;
-  }
-  global.isProcessing = true;
-  const msg = messageQueue.shift();
-  messageCount++;
-  try {
-    await global.conn.handler(msg);
-  } catch (err) {
-    secureLogger.error('ERROR procesando mensaje:', err);
-  }
-  global.isProcessing = false;
-  if (messageQueue.length > 0) {
-    const delay = getRandomDelay();
-    setTimeout(processMessageQueue, delay);
-  }
-}
-
-protoType();
-serialize();
-
-global.__filename = function filename(pathURL = import.meta.url, rmPrefix = platform !== 'win32') {
-  return rmPrefix ? /file:\/\/\//.test(pathURL) ? fileURLToPath(pathURL) : pathURL : pathToFileURL(pathURL).toString();
-};
-
-global.__dirname = function dirname(pathURL) {
-  return path.dirname(global.__filename(pathURL, true));
-};
-
-global.__require = function require(dir = import.meta.url) {
-  return createRequire(dir);
-};
-
-global.API = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({...query, ...(apikeyqueryname ? {[apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name]} : {})})) : '');
-
-global.timestamp = { start: new Date };
-
-global.videoList = [];
-global.videoListXXX = [];
-const __dirname = global.__dirname(import.meta.url);
-global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
-global.prefix = new RegExp('^[' + (opts['prefix'] || '*/i!#$%+£¢€¥^°=¶†×÷π√✓©®:;?&.\\-.@').replace(/[|\\{}()[\]^$+*?.\-\^]/g, '\\$&') + ']');
-global.db = new Low(/https?:\/\//.test(opts['db'] || '') ? new cloudDBAdapter(opts['db']) : new JSONFile(`${opts._[0] ? opts._[0] + '_' : ''}database.json`));
-
-global.loadDatabase = async function loadDatabase() {
-  if (global.db.READ) {
-    return new Promise((resolve) => setInterval(async function() {
-      if (!global.db.READ) {
-        clearInterval(this);
-        resolve(global.db.data == null ? global.loadDatabase() : global.db.data);
-      }
-    }, 1 * 1000));
-  }
-  if (global.db.data !== null) return;
-  global.db.READ = true;
-  await global.db.read().catch(console.error);
-  global.db.READ = null;
-  global.db.data = {
-    users: {}, chats: {}, stats: {}, msgs: {}, sticker: {}, settings: {},
-    privacy: { dataRetentionDays: privacyConfig.dataRetention.days, lastCleanup: Date.now(), userConsent: {} },
-    ...(global.db.data || {}),
-  };
-  global.db.chain = chain(global.db.data);
-};
-loadDatabase();
-
-const authFolder = global.authFile;
-const {state, saveCreds} = await useMultiFileAuthState(authFolder);
-const { version } = await fetchLatestBaileysVersion();
-
-const connectionOptions = {
-    logger: Pino({ level: 'silent' }),
-    printQRInTerminal: true, 
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
-    auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: 'fatal' }).child({ level: 'fatal' })),
-    },
-    markOnlineOnConnect: true,
-    version,
-    getMessage: async (key) => {
-        let jid = jidNormalizedUser(key.remoteJid);
-        let msg = await store.loadMessage(jid, key.id);
-        return msg?.message || "";
-    },
-    msgRetryCounterCache: new NodeCache({ stdTTL: 300, checkperiod: 60, useClones: false }),
-};
-
-global.conn = makeWASocket(connectionOptions);
-conn.ev.on('creds.update', saveCreds);
-
-restaurarConfiguraciones(global.conn);
-const ownerConfig = getOwnerFunction();
-if (ownerConfig.modopublico) global.conn.public = true;
-if (ownerConfig.auread) global.opts['autoread'] = true;
-if (ownerConfig.modogrupos) global.conn.modogrupos = true;
-conn.ev.on('connection.update', connectionUpdate);
-
-// Ejecución de servicios de limpieza
-if (isCleanerEnabled()) runCleaner();
-startAutoCleanService();
-
-async function connectionUpdate(update) {
-  const { connection, lastDisconnect, qr } = update;
-  stopped = connection;
-  if (qr) console.log(chalk.yellow('[ ℹ️ ] Escanea el código QR para iniciar sesión.'));
-  if (connection === 'open') {
-    console.log(chalk.green('[ ✅ ] Conectado correctamente a WhatsApp'));
-  } else if (connection === 'close') {
-    let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-    if (reason !== DisconnectReason.loggedOut) {
-       await global.reloadHandler(true).catch(console.error);
-    }
-  }
-}
-
-let handler = await import('./handler.js');
-global.reloadHandler = async function(restatConn) {
-  try {
-    const Handler = await import(`./handler.js?update=${Date.now()}`).catch(console.error);
-    if (Object.keys(Handler || {}).length) handler = Handler;
-  } catch (e) { console.error(e); }
-
-  if (restatConn) {
-    try { global.conn.ws.close(); } catch { }
-    conn.ev.removeAllListeners();
-    global.conn = makeWASocket(connectionOptions);
-    conn.ev.on('creds.update', saveCreds);
-  }
-
-  conn.handler = handler.handler.bind(global.conn);
-  conn.connectionUpdate = connectionUpdate.bind(global.conn);
-  conn.credsUpdate = saveCreds.bind(global.conn, true);
-
-  conn.ev.removeAllListeners('messages.upsert');
-  conn.ev.on('messages.upsert', async (msg) => {
-    if (!msg.messages || msg.messages[0].key.fromMe) return;
-    messageQueue.push(msg);
-    processMessageQueue();
-  });
-
-  if (!global.mentionListenerInitialized) {
-    mentionListener(conn);
-    global.mentionListenerInitialized = true;
-  }
-  return true;
-};
-
-const pluginFolder = global.__dirname(join(__dirname, './plugins/index'));
-const pluginFilter = (filename) => /\.js$/.test(filename);
-global.plugins = {};
-async function filesInit() {
-  for (const filename of readdirSync(pluginFolder).filter(pluginFilter)) {
-    try {
-      const file = global.__filename(join(pluginFolder, filename));
-      const module = await import(file);
-      global.plugins[filename] = module.default || module;
-    } catch (e) {
-      delete global.plugins[filename];
-    }
-  }
-}
-filesInit().catch(console.error);
-
-watch(pluginFolder, async (_ev, filename) => {
-    if (pluginFilter(filename)) {
-        const dir = global.__filename(join(pluginFolder, filename), true);
-        try {
-            const module = (await import(`${global.__filename(dir)}?update=${Date.now()}`));
-            global.plugins[filename] = module.default || module;
-        } catch (e) { console.error(`Error recargando plugin ${filename}`); }
-    }
+say('Iniciando...', {
+  font: 'simple',
+  align: 'center',
+  gradient: ['yellow', 'cyan'],
 });
 
-await global.reloadHandler();
+say('Luna-botv6', {
+  font: 'block',
+  align: 'center',
+  gradient: ['blue', 'magenta'],
+});
+
+process.stdout.write('\x07');
+
+console.log(chalk.hex('#00FFFF').bold('─◉ Bienvenido al sistema Luna-botv6'));
+console.log(chalk.hex('#FF00FF')('─◉ Preparando entorno y verificaciones necesarias...'));
+
+const rutaTmp = join(__dirname, 'src/tmp');
+try {
+  await fs.mkdir(rutaTmp, { recursive: true });
+  await fs.chmod(rutaTmp, 0o777);
+  console.log(chalk.hex('#39FF14')('✓ Carpeta src/tmp configurada correctamente.'));
+} catch (err) {
+  console.warn(chalk.hex('#FFA500')('⚠ Error configurando src/tmp:'), err.message);
+}
+
+async function limpiarArchivosTMP() {
+  const tmpPath = join(__dirname, 'src/tmp');
+  const coreFile = join(__dirname, 'core');
+  const MAX_AGE = 300000;
+  const stats = { tmp: 0, core: false, total: 0 };
+
+  try {
+    const [tmpFiles, coreExists] = await Promise.allSettled([
+      fs.readdir(tmpPath),
+      fs.access(coreFile).then(() => true).catch(() => false)
+    ]);
+
+    if (tmpFiles.status === 'fulfilled' && tmpFiles.value.length > 0) {
+      const now = Date.now();
+      const deletePromises = tmpFiles.value.map(async (file) => {
+        try {
+          const fullPath = join(tmpPath, file);
+          const fileStat = await fs.stat(fullPath);
+          
+          if (now - fileStat.mtimeMs > MAX_AGE) {
+            await fs.rm(fullPath, { recursive: true, force: true });
+            stats.tmp++;
+            return true;
+          }
+        } catch (err) {
+          return false;
+        }
+        return false;
+      });
+
+      await Promise.allSettled(deletePromises);
+    }
+
+    if (coreExists.status === 'fulfilled' && coreExists.value) {
+      try {
+        await fs.rm(coreFile, { force: true });
+        stats.core = true;
+      } catch {}
+    }
+
+    stats.total = stats.tmp + (stats.core ? 1 : 0);
+
+    if (stats.total > 0) {
+      const parts = [];
+      if (stats.tmp > 0) parts.push(`${stats.tmp} archivos tmp/`);
+      if (stats.core) parts.push('archivo core');
+      console.log(chalk.hex('#00CED1').bold('✨ Limpieza completada: ') + chalk.hex('#FF1493')(parts.join(' + ')));
+    }
+  } catch (err) {
+    console.error(chalk.hex('#FF1493')('✖ Error en limpieza:'), err.message);
+  }
+}
+
+let limpiezaActiva = false;
+
+async function ejecutarLimpieza() {
+  if (limpiezaActiva) return;
+  limpiezaActiva = true;
+  try {
+    await limpiarArchivosTMP();
+  } finally {
+    setTimeout(() => { limpiezaActiva = false; }, 5000);
+  }
+}
+
+setInterval(ejecutarLimpieza, 900000);
+setTimeout(ejecutarLimpieza, 3000);
+
+async function verificarOCrearCarpetaAuth() {
+  const authPath = join(__dirname, global.authFile);
+  try {
+    await fs.mkdir(authPath, { recursive: true });
+  } catch {}
+}
+
+function verificarCredsJson() {
+  const credsPath = join(__dirname, global.authFile, 'creds.json');
+  return fsSync.existsSync(credsPath);
+}
+
+function formatearNumeroTelefono(numero) {
+  let formattedNumber = numero.replace(/[^\d+]/g, '');
+  if (formattedNumber.startsWith('+52') && !formattedNumber.startsWith('+521')) {
+    formattedNumber = formattedNumber.replace('+52', '+521');
+  } else if (formattedNumber.startsWith('52') && !formattedNumber.startsWith('521')) {
+    formattedNumber = `+521${formattedNumber.slice(2)}`;
+  } else if (formattedNumber.startsWith('52') && formattedNumber.length >= 12) {
+    formattedNumber = `+${formattedNumber}`;
+  } else if (!formattedNumber.startsWith('+')) {
+    formattedNumber = `+${formattedNumber}`;
+  }
+  return formattedNumber;
+}
+
+function esNumeroValido(numeroTelefono) {
+  const numeroSinSigno = numeroTelefono.replace('+', '');
+  return Object.keys(PHONENUMBER_MCC).some(codigo => numeroSinSigno.startsWith(codigo));
+}
+
+async function start(file) {
+  if (isRunning) return;
+  isRunning = true;
+
+  await verificarOCrearCarpetaAuth();
+
+  // Si ya hay sesión, iniciamos normalmente
+  if (verificarCredsJson()) {
+    const args = [join(__dirname, file), ...process.argv.slice(2)];
+    setupMaster({ exec: args[0], args: args.slice(1) });
+    const p = fork();
+    return;
+  }
+
+  // ELIMINADA LA OPCIÓN 1 (QR), FORZAMOS CÓDIGO DE TEXTO
+  console.log(chalk.hex('#FFD700').bold('\n─◉ Iniciando vinculación por código de 8 dígitos...'));
+  
+  const phoneNumber = await question(chalk.hex('#FFD700').bold('─◉ Escriba su número de WhatsApp:\n') + chalk.hex('#E0E0E0').bold('◉ Ejemplo: +5493483466763\n─> '));
+  
+  const numeroTelefono = formatearNumeroTelefono(phoneNumber);
+  
+  if (!esNumeroValido(numeroTelefono)) {
+    console.log(chalk.bgHex('#FF1493')(chalk.white.bold('[ ERROR ] Número inválido. Use formato internacional.\n')));
+    process.exit(0);
+  }
+
+  // Agregamos los argumentos necesarios para que main.js sepa qué hacer
+  process.argv.push(numeroTelefono);
+  process.argv.push('code');
+
+  const args = [join(__dirname, file), ...process.argv.slice(2)];
+  setupMaster({ exec: args[0], args: args.slice(1) });
+
+  const p = fork();
+
+  p.on('message', (data) => {
+    console.log(chalk.hex('#39FF14').bold('─◉ RECIBIDO:'), data);
+    switch (data) {
+      case 'reset':
+        p.process.kill();
+        isRunning = false;
+        start.apply(this, arguments);
+        break;
+      case 'uptime':
+        p.send(process.uptime());
+        break;
+    }
+  });
+
+  p.on('exit', (_, code) => {
+    isRunning = false;
+    console.error(chalk.hex('#FF1493').bold('[ ERROR ] Ocurrió un error inesperado:'), code);
+    p.process.kill();
+    start.apply(this, arguments);
+    if (process.env.pm_id) {
+      process.exit(1);
+    } else {
+      process.exit();
+    }
+  });
+
+  const opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
+  if (!opts['test']) {
+    if (!rl.listenerCount()) {
+      rl.on('line', (line) => {
+        p.emit('message', line.trim());
+      });
+    }
+  }
+}
+
+start('main.js');
