@@ -24,7 +24,6 @@ import readline from 'readline';
 import NodeCache from 'node-cache';
 import http from 'http'; 
 
-// Importaciones de tus librerías originales
 import { restaurarConfiguraciones } from './lib/funcConfig.js';
 import { getOwnerFunction } from './lib/owner-funciones.js';
 import { isCleanerEnabled } from './lib/cleaner-config.js';
@@ -35,16 +34,18 @@ import mentionListener from './plugins/game-ialuna.js';
 const { chain } = lodash;
 const PORT = process.env.PORT || 3000;
 
-// ✅ CORRECCIÓN RENDER: Servidor para mantener puerto abierto
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('Luna-Botv6 Online');
-}).listen(PORT);
+// ✅ MEJORA 1: Servidor Robusto para Render (Evita el reinicio por puerto)
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is running...');
+});
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(chalk.green(`[ 🚀 ] Puerto ${PORT} abierto para Render.`));
+});
 
 let stopped = 'close';  
 let pairingTimeout = null;
-let pairingStartTime = null;
-const PAIRING_TIMEOUT_DURATION = 300000; // 5 minutos para que no te gane el tiempo
+const PAIRING_TIMEOUT_DURATION = 600000; // ✅ MEJORA 2: 10 minutos (Render es lento)
 
 protoType();
 serialize();
@@ -57,29 +58,26 @@ global.__dirname = function dirname(pathURL) {
 };
 const __dirname = global.__dirname(import.meta.url);
 
-// ✅ CORRECCIÓN: Función de reinicio con rutas seguras
+// Función de limpieza solo si falla realmente
 async function clearSessionAndRestart() {
-    console.log(chalk.red('[ ✖ ] Tiempo agotado. Limpiando sesión...'));
+    console.log(chalk.red('[ ✖ ] Fallo crítico en vinculación. Reiniciando...'));
     const carpetas = [global.authFile, 'MysticSession'];
     for (const carpeta of carpetas) {
         const ruta = join(process.cwd(), carpeta);
         if (existsSync(ruta)) await fs.promises.rm(ruta, { recursive: true, force: true }).catch(() => {});
     }
-    setTimeout(() => process.exit(1), 2000);
+    process.exit(1);
 }
 
-// Carga de base de datos original
 global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
 global.db = new Low(new JSONFile(`database.json`));
 global.loadDatabase = async function loadDatabase() {
   if (global.db.data !== null) return;
   await global.db.read().catch(console.error);
   global.db.data = { users: {}, chats: {}, stats: {}, msgs: {}, sticker: {}, settings: {}, privacy: { dataRetentionDays: 30, lastCleanup: Date.now() }, ...(global.db.data || {}) };
-  global.db.chain = chain(global.db.data);
 };
 loadDatabase();
 
-// Configuración de conexión
 const authFolder = global.authFile || 'MysticSession';
 const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 const { version } = await fetchLatestBaileysVersion();
@@ -87,81 +85,77 @@ const { version } = await fetchLatestBaileysVersion();
 const connectionOptions = {
     logger: Pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
     auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: 'fatal' })),
     },
     version,
     markOnlineOnConnect: true,
+    generateHighQualityLinkPreview: true,
     msgRetryCounterCache: new NodeCache()
 };
 
 global.conn = makeWASocket(connectionOptions);
 conn.ev.on('creds.update', saveCreds);
 
-// ✅ LÓGICA DE VINCULACIÓN MEJORADA
+// ✅ MEJORA 3: Lógica de vinculación sin borrar carpetas innecesariamente
 if (!fs.existsSync(`./${authFolder}/creds.json`)) {
     let phoneNumber = process.env.WHATSAPP_NUMBER || global.botnumber;
     if (phoneNumber) {
         let numeroTelefono = phoneNumber.replace(/[^0-9]/g, '');
-        console.log(chalk.cyan(`[ ℹ️ ] Vinculando al número: ${numeroTelefono}`));
+        console.log(chalk.cyan(`[ ℹ️ ] Intentando vincular: ${numeroTelefono}`));
         
-        pairingStartTime = Date.now();
-        pairingTimeout = setTimeout(() => { if (!global.conn?.user) clearSessionAndRestart(); }, PAIRING_TIMEOUT_DURATION);
+        pairingTimeout = setTimeout(() => { 
+            if (!global.conn?.user) {
+                console.log(chalk.red('[ ! ] El código expiró en Render.'));
+            }
+        }, PAIRING_TIMEOUT_DURATION);
 
         setTimeout(async () => {
-            let codigo = await global.conn.requestPairingCode(numeroTelefono);
-            if (codigo) {
-                codigo = codigo?.match(/.{1,4}/g)?.join("-") || codigo;
-                console.log(chalk.black(chalk.bgGreen('\n┌─────────────────────────────────────────────┐')));
-                console.log(chalk.black(chalk.bgGreen(`│ TU CÓDIGO ES: ${codigo}            │`)));
-                console.log(chalk.black(chalk.bgGreen('└─────────────────────────────────────────────┘\n')));
+            try {
+                let codigo = await global.conn.requestPairingCode(numeroTelefono);
+                if (codigo) {
+                    codigo = codigo?.match(/.{1,4}/g)?.join("-") || codigo;
+                    console.log(chalk.white(chalk.bgBlue('\n' + ' '.repeat(10) + 'CÓDIGO DE VINCULACIÓN' + ' '.repeat(10))));
+                    console.log(chalk.black(chalk.bgWhite('          ' + codigo + '          ')));
+                    console.log(chalk.white(chalk.bgBlue(' '.repeat(40) + '\n')));
+                }
+            } catch (e) {
+                console.log(chalk.red('[ ! ] Error al pedir código. Revisa si el número es correcto.'));
             }
-        }, 5000);
+        }, 10000); // 10 segundos de espera inicial para asegurar que Baileys esté listo
     }
 }
 
-// ✅ CORRECCIÓN: clearTmp sin src/src duplicado
-async function clearTmp() {
-  const tmpPaths = [join(process.cwd(), 'src', 'tmp'), join(process.cwd(), 'temp')];
-  for (const p of tmpPaths) {
-    if (!existsSync(p)) continue;
-    const files = await readdir(p);
-    for (const file of files) {
-      const filePath = join(p, file);
-      const s = await stat(filePath);
-      if (Date.now() - s.mtimeMs >= 1800000) await unlink(filePath).catch(() => {});
-    }
-  }
-}
-
-// Handler de conexión original
 async function connectionUpdate(update) {
   const { connection, lastDisconnect } = update;
-  stopped = connection;
   if (connection === 'open') {
-    console.log(chalk.green('[ ✅ ] Bot conectado correctamente.'));
+    console.log(chalk.green('[ ✅ ] Conectado! Luna-Bot está activo.'));
     if (pairingTimeout) clearTimeout(pairingTimeout);
   }
   if (connection === 'close') {
     const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
     if (reason !== DisconnectReason.loggedOut) {
-       setTimeout(() => global.reloadHandler(true), 2000);
-    } else {
-       console.log(chalk.red('Sesión cerrada. Borra la carpeta de sesión.'));
+       console.log(chalk.yellow('[ ⚠️ ] Conexión perdida, reintentando...'));
+       setTimeout(() => global.reloadHandler(true), 5000);
     }
   }
 }
 
 conn.ev.on('connection.update', connectionUpdate);
 
-// Iniciar servicios adicionales originales
+// Servidores y limpieza
 startAutoCleanService();
-if (isCleanerEnabled()) fork('./lib/cleaner.js');
-setInterval(() => clearTmp(), 1000 * 60 * 60 * 2);
+setInterval(async () => {
+  const tmpPath = join(process.cwd(), 'temp');
+  if (existsSync(tmpPath)) {
+    const files = await readdir(tmpPath);
+    for (const file of files) await unlink(join(tmpPath, file)).catch(() => {});
+  }
+}, 1000 * 60 * 60);
 
-// Re-importar el Handler (Cerebro del bot)
+// Handler
 let handler = await import('./handler.js');
 global.reloadHandler = async function(restatConn) {
   try {
@@ -170,7 +164,6 @@ global.reloadHandler = async function(restatConn) {
   } catch (e) { console.error(e); }
   
   if (restatConn) {
-    try { global.conn.ws.close(); } catch { }
     global.conn = makeWASocket(connectionOptions);
     conn.ev.on('creds.update', saveCreds);
   }
@@ -180,4 +173,3 @@ global.reloadHandler = async function(restatConn) {
 };
 
 await global.reloadHandler();
-console.log(chalk.green('✓ Sistema cargado completamente.'));
